@@ -12,6 +12,17 @@ pub fn main() !void {
     });
     defer listener.deinit();
 
-    _ = try listener.accept();
-    std.debug.print("client connected!", .{});
+    const connection = try listener.accept();
+
+    var connectionStream = connection.stream;
+    defer connectionStream.close();
+
+    var responseBuffer: [1024]u8 = undefined;
+
+    var writer = connectionStream.writer(&responseBuffer);
+
+    try writer.interface.print("HTTP/1.1 200 OK\r\n\r\n", .{});
+    try writer.interface.flush();
+
+    std.debug.print("client connected!\n", .{});
 }
