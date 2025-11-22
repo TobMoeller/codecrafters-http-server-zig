@@ -12,13 +12,16 @@ pub fn main() !void {
     });
     defer listener.deinit();
 
-    // TODO learn and use threads
     while (true) {
         const connection = listener.accept() catch |err| {
             std.debug.print("{any}", .{err});
             continue;
         };
-        try handleRequest(allocator, connection);
+        _ = std.Thread.spawn(.{}, handleRequest, .{allocator, connection}) catch |err| {
+            std.debug.print("unable to spawn connection thread: {s}", .{@errorName(err)});
+            connection.stream.close();
+            continue;
+        };
     }
 }
 
