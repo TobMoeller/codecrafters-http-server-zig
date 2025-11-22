@@ -2,6 +2,10 @@ const std = @import("std");
 const net = std.net;
 
 pub fn main() !void {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
     const address = try net.Address.resolveIp("127.0.0.1", 4221);
     var listener = try address.listen(.{
         .reuse_address = true,
@@ -9,38 +13,82 @@ pub fn main() !void {
     defer listener.deinit();
 
     const connection = try listener.accept();
-    try handleRequest(connection);
+    try handleRequest(allocator, connection);
 }
 
-pub fn handleRequest(connection: std.net.Server.Connection) !void {
+pub fn handleRequest(global_allocator: std.mem.Allocator, connection: std.net.Server.Connection) !void {
+    var arena: std.heap.ArenaAllocator = .init(global_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
     defer connection.stream.close();
 
     var requestBuffer: [1024]u8 = undefined;
     var reader = connection.stream.reader(&requestBuffer);
     const interface: *std.Io.Reader = reader.interface();
+
     const firstLine = try interface.takeDelimiterInclusive('\n');
 
-    const requestLine = try parseRequestLine(firstLine);
+    // TODO refactor request initialization
+    var request: Request = .{
+        .requestLine = try parseRequestLine(firstLine),
+        .headers = .init(allocator),
+    };
 
-    var statusLine: StatusLine = undefined;
-    var body: ?[]const u8 = null;
-    if (std.mem.eql(u8, "/", requestLine.target)) {
-        statusLine = StatusLine{
+    while (interface.takeDelimiterInclusive('\n')) |line| {
+        if (line.len <= 2) { // empty line "\r\n" - end of headers
+            break;
+        }
+
+        var splitLine = std.mem.splitScalar(u8, line, ':');
+        const key = splitLine.first(); // TODO case insensitive?
+        if (key[key.len - 1] == ' ' or key[0] == ' ') return HeaderError.MalformedHeader;
+        const value = std.mem.trim(u8, splitLine.rest(), " \r\n");
+        try request.headers.put(key, value);
+    } else |err| switch (err) {
+        std.Io.Reader.DelimiterError.EndOfStream => {
+            std.debug.print("Client closed connection", .{});
+            return err;
+        },
+        else => {
+            std.debug.print("{any}", .{err});
+            return err;
+        }
+    }
+
+    try routeRequest(connection, request);
+}
+
+pub fn routeRequest(connection: std.net.Server.Connection, request: Request) !void {
+    const requestLine = request.requestLine;
+    var statusLine: StatusLine = StatusLine{
             .statusCode = "200",
             .reasonPhrase = "OK"
         };
-    } else if (std.mem.containsAtLeast(u8, requestLine.target, 1, "/echo/")) {
+    var responseBody: ?[]const u8 = null;
+
+
+    if (std.mem.eql(u8, "/", requestLine.target)) {
+        // OK
+    } else if (std.mem.startsWith(u8, requestLine.target, "/echo/")) {
         const arg = std.mem.trimStart(u8, requestLine.target, "/echo/");
         if (arg.len > 0) {
-            statusLine = StatusLine{
-                .statusCode = "200",
-                .reasonPhrase = "OK",
-            };
-            body = arg;
+            // OK
+            responseBody = arg;
         } else {
             statusLine = StatusLine{
                 .statusCode = "400",
                 .reasonPhrase = "Bad Request",
+            };
+        }
+    } else if (std.mem.startsWith(u8, requestLine.target, "/user-agent")) {
+        const userAgent = request.headers.get("User-Agent");
+        if (userAgent != null) {
+            // OK
+            responseBody = userAgent;
+        } else {
+            statusLine = StatusLine{
+                .statusCode = "400",
+                .reasonPhrase = "Not Found"
             };
         }
     } else {
@@ -49,7 +97,7 @@ pub fn handleRequest(connection: std.net.Server.Connection) !void {
             .reasonPhrase = "Not Found"
         };
     }
-    try sendResponse(connection, statusLine, body);
+    try sendResponse(connection, statusLine, responseBody);
 }
 
 pub fn sendResponse(connection: std.net.Server.Connection, statusLine: StatusLine, body: ?[]const u8) !void {
@@ -112,6 +160,12 @@ pub fn parseRequestLine(line: []const u8) !RequestLine {
     return requestLine;
 }
 
+const Request = struct {
+    requestLine: RequestLine,
+    headers: std.StringHashMap([]const u8),
+    // body: ?[]const u8,
+};
+
 const RequestLine = struct {
     method: HttpMethod,
     target: []const u8,
@@ -128,6 +182,10 @@ const RequestLineError = error {
     InvalidTarget,
     InvalidVersion,
     ParseError,
+};
+
+const HeaderError = error {
+    MalformedHeader,
 };
 
 const StatusLine = struct {
