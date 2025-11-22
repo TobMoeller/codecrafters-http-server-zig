@@ -1,10 +1,27 @@
 const std = @import("std");
 const net = std.net;
 
+var directoryArgument: ?[]const u8 = null;
+
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+
+    var argIterator = try std.process.argsWithAllocator(allocator);
+    defer argIterator.deinit();
+
+    _ = argIterator.skip(); // skip first argument ()
+    while (argIterator.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--directory")) {
+
+            const dirArg = argIterator.next() orelse {
+                std.debug.print("Invalid Directory Argument", .{});
+                return;
+            };
+            directoryArgument = try allocator.dupe(u8, dirArg);
+        }
+    }
 
     const address = try net.Address.resolveIp("127.0.0.1", 4221);
     var listener = try address.listen(.{
@@ -64,52 +81,57 @@ pub fn handleRequest(global_allocator: std.mem.Allocator, connection: std.net.Se
         }
     }
 
-    try routeRequest(connection, request);
+    try routeRequest(allocator, connection, request);
 }
 
-pub fn routeRequest(connection: std.net.Server.Connection, request: Request) !void {
+pub fn routeRequest(allocator: std.mem.Allocator, connection: std.net.Server.Connection, request: Request) !void {
     const requestLine = request.requestLine;
-    var statusLine: StatusLine = StatusLine{
-            .statusCode = "200",
-            .reasonPhrase = "OK"
-        };
+    var statusLine: StatusLine = undefined;
     var responseBody: ?[]const u8 = null;
 
 
     if (std.mem.eql(u8, "/", requestLine.target)) {
-        // OK
+        statusLine = StatusLine.ok();
+
     } else if (std.mem.startsWith(u8, requestLine.target, "/echo/")) {
         const arg = std.mem.trimStart(u8, requestLine.target, "/echo/");
         if (arg.len > 0) {
-            // OK
+            statusLine = StatusLine.ok();
             responseBody = arg;
         } else {
-            statusLine = StatusLine{
-                .statusCode = "400",
-                .reasonPhrase = "Bad Request",
-            };
+            statusLine = StatusLine.badRequest();
         }
+
     } else if (std.mem.startsWith(u8, requestLine.target, "/user-agent")) {
         const userAgent = request.headers.get("User-Agent");
         if (userAgent != null) {
-            // OK
+            statusLine = StatusLine.ok();
             responseBody = userAgent;
         } else {
-            statusLine = StatusLine{
-                .statusCode = "400",
-                .reasonPhrase = "Not Found"
-            };
+            statusLine = StatusLine.badRequest();
         }
+
+    } else if (std.mem.startsWith(u8, requestLine.target, "/files/")) {
+        const path = std.mem.trimStart(u8, requestLine.target, "/files/");
+        if (path.len > 0) {
+            responseBody = readFile(allocator, path);
+            if (responseBody == null) {
+                statusLine = StatusLine.notFound();
+            } else {
+                statusLine = StatusLine.ok();
+            }
+        } else {
+            statusLine = StatusLine.badRequest();
+        }
+
     } else {
-        statusLine = StatusLine{
-            .statusCode = "404",
-            .reasonPhrase = "Not Found"
-        };
+        statusLine = StatusLine.notFound();
     }
-    try sendResponse(connection, statusLine, responseBody);
+
+    try sendResponse(connection, statusLine, responseBody, std.mem.startsWith(u8, requestLine.target, "/files/")); // TODO refactor to response struct
 }
 
-pub fn sendResponse(connection: std.net.Server.Connection, statusLine: StatusLine, body: ?[]const u8) !void {
+pub fn sendResponse(connection: std.net.Server.Connection, statusLine: StatusLine, body: ?[]const u8, isFile: bool) !void {
     var responseBuffer: [1024]u8 = undefined;
     var writer = connection.stream.writer(&responseBuffer);
 
@@ -125,8 +147,12 @@ pub fn sendResponse(connection: std.net.Server.Connection, statusLine: StatusLin
 
     // HEADERS
     if (body != null) {
+        if (isFile) {
+            try writer.interface.print("Content-Type: application/octet-stream\r\n", .{});
+        } else {
+            try writer.interface.print("Content-Type: text/plain\r\n", .{});
+        }
         try writer.interface.print(
-            "Content-Type: text/plain\r\n" ++
             "Content-Length: {d}\r\n",
             .{body.?.len}
         );
@@ -135,7 +161,7 @@ pub fn sendResponse(connection: std.net.Server.Connection, statusLine: StatusLin
 
     // BODY
     if (body != null) {
-        try writer.interface.print("{s}", .{body.?});
+        try writer.interface.writeAll(body.?);
     }
 
     try writer.interface.flush();
@@ -167,6 +193,21 @@ pub fn parseRequestLine(line: []const u8) !RequestLine {
     }
 
     return requestLine;
+}
+
+pub fn readFile(allocator: std.mem.Allocator, path: []const u8) ?[]const u8 {
+    var dir = std.fs.openDirAbsolute(directoryArgument orelse return null, .{})
+        catch return null;
+    defer dir.close();
+
+    var file = dir.openFile(path, .{.mode = .read_only}) catch return null;
+    defer file.close();
+
+    const fileStat = file.stat() catch return null;
+    const fileSize = fileStat.size;
+
+    var reader: std.fs.File.Reader = file.reader(&.{});
+    return reader.interface.readAlloc(allocator, fileSize) catch return null;
 }
 
 const Request = struct {
@@ -201,4 +242,25 @@ const StatusLine = struct {
     version: []const u8 = "HTTP/1.1",
     statusCode: []const u8,
     reasonPhrase: ?[]const u8 = null,
+
+    pub fn ok() StatusLine {
+        return .{
+            .statusCode = "200",
+            .reasonPhrase = "OK",
+        };
+    }
+
+    pub fn notFound() StatusLine {
+        return .{
+            .statusCode = "404",
+            .reasonPhrase = "Not Found",
+        };
+    }
+
+    pub fn badRequest() StatusLine {
+        return .{
+            .statusCode = "400",
+            .reasonPhrase = "Bad Request",
+        };
+    }
 };
