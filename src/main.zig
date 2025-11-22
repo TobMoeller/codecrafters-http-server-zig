@@ -62,7 +62,7 @@ pub fn sendResponse(connection: std.net.Server.Connection, statusLine: StatusLin
         statusLine.statusCode,
     });
     if (statusLine.reasonPhrase != null) {
-        try writer.interface.print(" {s}\r\n", .{statusLine.reasonPhrase.?});
+        try writer.interface.print(" {s}", .{statusLine.reasonPhrase.?});
     }
     try writer.interface.print("\r\n", .{});
 
