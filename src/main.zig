@@ -44,7 +44,7 @@ pub fn sendResponse(connection: std.net.Server.Connection, statusLine: StatusLin
     try writer.interface.print("{s} {s} {s}\r\n\r\n", .{
         statusLine.version,
         statusLine.statusCode,
-        statusLine.version,
+        statusLine.reasonPhrase orelse "",
     });
 
     try writer.interface.flush();
