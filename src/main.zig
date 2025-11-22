@@ -23,29 +23,63 @@ pub fn handleRequest(connection: std.net.Server.Connection) !void {
     const requestLine = try parseRequestLine(firstLine);
 
     var statusLine: StatusLine = undefined;
+    var body: ?[]const u8 = null;
     if (std.mem.eql(u8, "/", requestLine.target)) {
         statusLine = StatusLine{
             .statusCode = "200",
             .reasonPhrase = "OK"
         };
+    } else if (std.mem.containsAtLeast(u8, requestLine.target, 1, "/echo/")) {
+        const arg = std.mem.trimStart(u8, requestLine.target, "/echo/");
+        if (arg.len > 0) {
+            statusLine = StatusLine{
+                .statusCode = "200",
+                .reasonPhrase = "OK",
+            };
+            body = arg;
+        } else {
+            statusLine = StatusLine{
+                .statusCode = "400",
+                .reasonPhrase = "Bad Request",
+            };
+        }
     } else {
         statusLine = StatusLine{
             .statusCode = "404",
             .reasonPhrase = "Not Found"
         };
     }
-    try sendResponse(connection, statusLine);
+    try sendResponse(connection, statusLine, body);
 }
 
-pub fn sendResponse(connection: std.net.Server.Connection, statusLine: StatusLine) !void {
+pub fn sendResponse(connection: std.net.Server.Connection, statusLine: StatusLine, body: ?[]const u8) !void {
     var responseBuffer: [1024]u8 = undefined;
     var writer = connection.stream.writer(&responseBuffer);
 
-    try writer.interface.print("{s} {s} {s}\r\n\r\n", .{
+    // STATUS LINE
+    try writer.interface.print("{s} {s}", .{
         statusLine.version,
         statusLine.statusCode,
-        statusLine.reasonPhrase orelse "",
     });
+    if (statusLine.reasonPhrase != null) {
+        try writer.interface.print(" {s}\r\n", .{statusLine.reasonPhrase.?});
+    }
+    try writer.interface.print("\r\n", .{});
+
+    // HEADERS
+    if (body != null) {
+        try writer.interface.print(
+            "Content-Type: text/plain\r\n" ++
+            "Content-Length: {d}\r\n",
+            .{body.?.len}
+        );
+    }
+    try writer.interface.print("\r\n", .{});
+
+    // BODY
+    if (body != null) {
+        try writer.interface.print("{s}", .{body.?});
+    }
 
     try writer.interface.flush();
 }
