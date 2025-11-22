@@ -12,8 +12,14 @@ pub fn main() !void {
     });
     defer listener.deinit();
 
-    const connection = try listener.accept();
-    try handleRequest(allocator, connection);
+    // TODO learn and use threads
+    while (true) {
+        const connection = listener.accept() catch |err| {
+            std.debug.print("{any}", .{err});
+            continue;
+        };
+        try handleRequest(allocator, connection);
+    }
 }
 
 pub fn handleRequest(global_allocator: std.mem.Allocator, connection: std.net.Server.Connection) !void {
